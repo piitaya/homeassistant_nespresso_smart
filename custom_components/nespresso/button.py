@@ -25,7 +25,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 
 from bleak import BleakError
 from homeassistant.components.button import ButtonEntity
@@ -33,7 +35,6 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import (
     DOMAIN,
@@ -44,8 +45,14 @@ from .const import (
     MachineFamily,
 )
 from .coordinator import NespressoCoordinator
+from .entity import NespressoEntity
 
 _LOGGER = logging.getLogger(__name__)
+
+WAKING_STATES = frozenset({"power_save", "standby"})
+WAITING_STATES = frozenset({"heating", "initializing", "ready_old_capsule"})
+WAKE_TIMEOUT_SECONDS = 300
+STATE_POLL_INTERVAL = 5
 
 
 async def async_setup_entry(
@@ -66,10 +73,23 @@ async def async_setup_entry(
     async_add_entities(entities)
 
 
-class NespressoFotaCheckButton(CoordinatorEntity[NespressoCoordinator], ButtonEntity):
+def _make_device_info(coordinator: NespressoCoordinator, entry: ConfigEntry) -> DeviceInfo:
+    family = MachineFamily(entry.data["family"])
+    data = coordinator.data
+    return DeviceInfo(
+        identifiers={(DOMAIN, entry.data["address"])},
+        name=entry.data.get("name", "Nespresso"),
+        manufacturer="Nespresso",
+        model=MACHINE_FAMILY_NAMES.get(family, "Unknown"),
+        serial_number=data.serial_number if data else None,
+        sw_version=data.firmware_version if data else None,
+        hw_version=data.hardware_version if data else None,
+    )
+
+
+class NespressoFotaCheckButton(NespressoEntity, ButtonEntity):
     """Button to check for firmware updates on VMini."""
 
-    _attr_has_entity_name = True
     _attr_name = "Check firmware update"
     _attr_icon = "mdi:cellphone-arrow-down"
 
@@ -81,17 +101,7 @@ class NespressoFotaCheckButton(CoordinatorEntity[NespressoCoordinator], ButtonEn
         super().__init__(coordinator)
         self._address = entry.data["address"]
         self._attr_unique_id = f"{self._address}_fota_check"
-        family = MachineFamily(entry.data["family"])
-        data = coordinator.data
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, self._address)},
-            name=entry.data.get("name", "Nespresso"),
-            manufacturer="Nespresso",
-            model=MACHINE_FAMILY_NAMES.get(family, "Unknown"),
-            serial_number=data.serial_number if data else None,
-            sw_version=data.firmware_version if data else None,
-            hw_version=data.hardware_version if data else None,
-        )
+        self._attr_device_info = _make_device_info(coordinator, entry)
 
     async def async_press(self) -> None:
         """Send CHECK_FOR_UPDATE command (0x00) to CHAR_FOTA_COMMAND."""
@@ -105,15 +115,9 @@ class NespressoFotaCheckButton(CoordinatorEntity[NespressoCoordinator], ButtonEn
             _LOGGER.error("Failed to send FOTA check: %s", err)
 
 
-class NespressoVertuoBrewButton(CoordinatorEntity[NespressoCoordinator], ButtonEntity):
-    """Button to start brewing on Vertuo Next.
+class NespressoVertuoBrewButton(NespressoEntity, ButtonEntity):
+    """Button to start brewing on Vertuo Next."""
 
-    Uses the brew type and temperature from the corresponding select entities.
-    Command format: [cmdID=3, subCmdID=5, dataControl=7, 4, 0, 0, 0, 0, temp, brew_type]
-    Written to CHAR_COMMAND_REQ (06AA3A42).
-    """
-
-    _attr_has_entity_name = True
     _attr_name = "Brew"
     _attr_icon = "mdi:coffee"
 
@@ -126,128 +130,99 @@ class NespressoVertuoBrewButton(CoordinatorEntity[NespressoCoordinator], ButtonE
         self._brew_pending = False
         self._address = entry.data["address"]
         self._attr_unique_id = f"{self._address}_vertuo_brew"
-        family = MachineFamily(entry.data["family"])
-        data = coordinator.data
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, self._address)},
-            name=entry.data.get("name", "Nespresso"),
-            manufacturer="Nespresso",
-            model=MACHINE_FAMILY_NAMES.get(family, "Unknown"),
-            serial_number=data.serial_number if data else None,
-            sw_version=data.firmware_version if data else None,
-            hw_version=data.hardware_version if data else None,
-        )
+        self._attr_device_info = _make_device_info(coordinator, entry)
 
     async def async_press(self) -> None:
-        """Send brew command to the machine.
+        """Wait for the machine to be ready, then send the brew command.
 
-        Only one brew at a time. If pressed multiple times while waiting,
-        subsequent presses are ignored.
+        Only one brew at a time. Duplicate presses while a brew is queued
+        are ignored.
         """
         if self._brew_pending:
             _LOGGER.debug("Brew already pending, ignoring duplicate press")
             return
         self._brew_pending = True
-
         try:
-            await self._do_brew()
+            state = await self._wait_until_ready()
+            if state != "ready":
+                return
+            await self._send_brew_command()
         finally:
             self._brew_pending = False
-            await self.coordinator.async_release_kept_connection()
+        await self.coordinator.async_request_refresh()
 
-    async def _do_brew(self) -> None:
-        """Internal brew logic."""
-        import asyncio
+    def _current_state(self) -> str | None:
+        data = self.coordinator.data
+        return data.machine_state if data else None
 
-        from .select import VERTUO_BREW_TYPE_VALUES, VERTUO_TEMPERATURE_VALUES
+    async def _wait_until_ready(self) -> str | None:
+        """Poll-driven wait for the machine to reach ``ready``.
 
-        # Tell the coordinator to keep the next poll connection alive
-        # so we can send the brew on the same authenticated session
-        self.coordinator._keep_connection = True  # noqa: SLF001
+        Returns the final observed state. A non-``ready`` return means the
+        caller should abort the brew (timeout, error, or unsupported state).
+        """
+        state = self._current_state()
+        if state in WAKING_STATES:
+            state = await self._wait_for_wake(state)
+            if state in WAKING_STATES:
+                return state
 
-        waiting = {"heating", "initializing", "ready_old_capsule"}
-        waking = {"power_save", "standby"}
-
-        # Wait for machine to be ready
-        state = self.coordinator.data.machine_state if self.coordinator.data else None
-        if state in waking:
-            await self.hass.services.async_call(
-                "persistent_notification",
-                "create",
-                {
-                    "message": "The machine is in power save mode. "
-                    "Press the button on the machine to wake it up. "
-                    "Brewing will start automatically when the machine is ready.",
-                    "title": "Nespresso: machine asleep",
-                    "notification_id": "nespresso_power_save",
-                },
-            )
-            _LOGGER.info("Machine is %s, waiting up to 5 min for wake...", state)
-            import time
-
-            deadline = time.monotonic() + 300
-            while state in waking and time.monotonic() < deadline:
-                await asyncio.sleep(5)
-                await self.coordinator.async_request_refresh()
-                state = (
-                    self.coordinator.data.machine_state
-                    if self.coordinator.data
-                    else None
-                )
-            await self.hass.services.async_call(
-                "persistent_notification",
-                "dismiss",
-                {"notification_id": "nespresso_power_save"},
-            )
-            if state in waking:
-                _LOGGER.error("Timeout waiting for machine to wake up")
-                return
         if state == "ready_old_capsule":
-            await self.hass.services.async_call(
-                "persistent_notification",
-                "create",
-                {
-                    "message": "Please eject the used capsule and insert a fresh one. "
-                    "Brewing will start automatically when the machine is ready.",
-                    "title": "Nespresso: replace capsule",
-                    "notification_id": "nespresso_capsule",
-                },
+            await self._notify(
+                "nespresso_capsule",
+                "Nespresso: replace capsule",
+                "Please eject the used capsule and insert a fresh one. "
+                "Brewing will start automatically when the machine is ready.",
             )
-        if state in waiting:
+
+        if state in WAITING_STATES:
             _LOGGER.info("Machine is %s, waiting for ready...", state)
-            while state in waiting:
-                await asyncio.sleep(5)
+            while state in WAITING_STATES:
+                await asyncio.sleep(STATE_POLL_INTERVAL)
                 await self.coordinator.async_request_refresh()
-                state = (
-                    self.coordinator.data.machine_state
-                    if self.coordinator.data
-                    else None
-                )
+                state = self._current_state()
+
+        await self._dismiss_notification("nespresso_capsule")
 
         if state != "ready":
-            _LOGGER.error("Machine is in state '%s', cannot brew (need: ready)", state)
-            await self.hass.services.async_call(
-                "persistent_notification",
-                "create",
-                {
-                    "message": f"The machine is in state '{state}' and cannot brew. "
-                    "It needs to be in 'ready' state.",
-                    "title": "Nespresso: cannot brew",
-                    "notification_id": "nespresso_brew_error",
-                },
+            _LOGGER.error("Machine is in state '%s', cannot brew", state)
+            await self._notify(
+                "nespresso_brew_error",
+                "Nespresso: cannot brew",
+                f"The machine is in state '{state}' and cannot brew. "
+                "It needs to be in 'ready' state.",
             )
-            return
+        return state
 
-        await self.hass.services.async_call(
-            "persistent_notification",
-            "dismiss",
-            {"notification_id": "nespresso_capsule"},
+    async def _wait_for_wake(self, state: str | None) -> str | None:
+        """Hold until the user wakes the machine, or timeout."""
+        await self._notify(
+            "nespresso_power_save",
+            "Nespresso: machine asleep",
+            "The machine is in power save mode. "
+            "Press the button on the machine to wake it up. "
+            "Brewing will start automatically when the machine is ready.",
         )
+        _LOGGER.info("Machine is %s, waiting up to 5 min for wake...", state)
+        deadline = time.monotonic() + WAKE_TIMEOUT_SECONDS
+        while state in WAKING_STATES and time.monotonic() < deadline:
+            await asyncio.sleep(STATE_POLL_INTERVAL)
+            await self.coordinator.async_request_refresh()
+            state = self._current_state()
+        await self._dismiss_notification("nespresso_power_save")
+        if state in WAKING_STATES:
+            _LOGGER.error("Timeout waiting for machine to wake up")
+        return state
+
+    async def _send_brew_command(self) -> None:
+        """Send the brew command on a fresh session, with BST fallback."""
+        from .ble.bst import encode_recipe_data
+        from .select import VERTUO_BREW_TYPE_VALUES, VERTUO_TEMPERATURE_VALUES
 
         brew_type = VERTUO_BREW_TYPE_VALUES.get(self.coordinator.brew_type, 1)
         temp = VERTUO_TEMPERATURE_VALUES.get(self.coordinator.brew_temperature, 0)
 
-        # Try simple CCommandReq first (works on Vertuo Next)
+        # Simple CCommandReq (works on Vertuo Next).
         buf = bytearray(10)
         buf[0] = 3  # cmdID: machine command
         buf[1] = 5  # subCmdID: start brew
@@ -265,30 +240,38 @@ class NespressoVertuoBrewButton(CoordinatorEntity[NespressoCoordinator], ButtonE
         )
 
         try:
-            rsp = await self.coordinator.async_send_command(
-                VERTUO_CHAR_COMMAND_REQ, VERTUO_CHAR_COMMAND_RSP, bytes(buf)
-            )
-            if rsp:
-                _LOGGER.info("Brew response from %s: %s", self._address, rsp.hex())
-                await self.coordinator.async_request_refresh()
-                return
+            async with self.coordinator.session() as client:
+                rsp = await client.send_command(
+                    VERTUO_CHAR_COMMAND_REQ, VERTUO_CHAR_COMMAND_RSP, bytes(buf)
+                )
+                if rsp:
+                    _LOGGER.info("Brew response from %s: %s", self._address, rsp.hex())
+                    return
 
-            # No response to simple command. Try BST recipe protocol.
-            _LOGGER.info(
-                "No response to simple brew, trying BST recipe on %s", self._address
-            )
-            from .ble.bst import encode_recipe_data
-
-            recipe_data = encode_recipe_data(
-                "3/0/1000/0/500/0/0/2/94/85/155/498/0/50/0/0/0"
-            )
-            ok = await self.coordinator.async_bst_send(
-                VERTUO_CHAR_COMMAND_REQ, VERTUO_CHAR_COMMAND_RSP, recipe_data
-            )
-            if ok:
-                _LOGGER.info("BST recipe sent to %s", self._address)
-            else:
-                _LOGGER.warning("BST recipe failed on %s", self._address)
-            await self.coordinator.async_request_refresh()
+                _LOGGER.info("No response to simple brew, trying BST recipe")
+                recipe_data = encode_recipe_data(
+                    "3/0/1000/0/500/0/0/2/94/85/155/498/0/50/0/0/0"
+                )
+                ok = await client.bst_send(
+                    VERTUO_CHAR_COMMAND_REQ, VERTUO_CHAR_COMMAND_RSP, recipe_data
+                )
+                if ok:
+                    _LOGGER.info("BST recipe sent to %s", self._address)
+                else:
+                    _LOGGER.warning("BST recipe failed on %s", self._address)
         except (BleakError, TimeoutError) as err:
             _LOGGER.error("Failed to send brew command: %s", err)
+
+    async def _notify(self, notification_id: str, title: str, message: str) -> None:
+        await self.hass.services.async_call(
+            "persistent_notification",
+            "create",
+            {"message": message, "title": title, "notification_id": notification_id},
+        )
+
+    async def _dismiss_notification(self, notification_id: str) -> None:
+        await self.hass.services.async_call(
+            "persistent_notification",
+            "dismiss",
+            {"notification_id": notification_id},
+        )

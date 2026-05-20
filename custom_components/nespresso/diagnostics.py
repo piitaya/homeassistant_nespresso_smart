@@ -31,7 +31,7 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
-from .const import DOMAIN
+from .const import DEFAULT_SCAN_INTERVAL, DOMAIN
 from .coordinator import NespressoCoordinator
 
 REDACT_KEYS = {"address", "serial_number", "auth_key"}
@@ -59,10 +59,10 @@ async def async_get_config_entry_diagnostics(
             }
         ),
         "coordinator": {
-            "last_update_success": coordinator.last_update_success,
-            "update_interval_seconds": coordinator.update_interval.total_seconds()
-            if coordinator.update_interval
-            else None,
+            "available": coordinator.available,
+            "last_poll_successful": coordinator.last_poll_successful,
+            "scan_interval_seconds": DEFAULT_SCAN_INTERVAL,
+            "last_seen": coordinator.last_seen,
         },
     }
 
@@ -73,13 +73,8 @@ async def async_get_config_entry_diagnostics(
         if gatt_dump:
             diag["gatt_characteristic_dump"] = gatt_dump
 
-    if coordinator.last_exception is not None:
-        diag["last_error"] = str(coordinator.last_exception)
-
     diag["debug_info"] = {
         "family": coordinator.family.value,
-        "persistent_mode": coordinator.persistent,
-        "has_active_client": coordinator._client is not None,
     }
 
     return diag

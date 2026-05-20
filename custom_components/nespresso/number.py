@@ -33,8 +33,6 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
-
 from .const import (
     DOMAIN,
     MACHINE_FAMILY_NAMES,
@@ -42,6 +40,7 @@ from .const import (
     MachineFamily,
 )
 from .coordinator import NespressoCoordinator
+from .entity import NespressoEntity
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -63,10 +62,9 @@ async def async_setup_entry(
     async_add_entities(entities)
 
 
-class NespressoWaterHardness(CoordinatorEntity[NespressoCoordinator], NumberEntity):
+class NespressoWaterHardness(NespressoEntity, NumberEntity):
     """Number entity for Vertuo Next water hardness setting."""
 
-    _attr_has_entity_name = True
     _attr_name = "Water hardness"
     _attr_icon = "mdi:water"
     _attr_native_min_value = 0
@@ -127,10 +125,9 @@ class NespressoWaterHardness(CoordinatorEntity[NespressoCoordinator], NumberEnti
             _LOGGER.error("Failed to set water hardness: %s", err)
 
 
-class NespressoAutoPowerOff(CoordinatorEntity[NespressoCoordinator], NumberEntity):
+class NespressoAutoPowerOff(NespressoEntity, NumberEntity):
     """Number entity for Vertuo Next auto power off time."""
 
-    _attr_has_entity_name = True
     _attr_name = "Auto power off"
     _attr_icon = "mdi:timer-off-outline"
     _attr_native_min_value = 0

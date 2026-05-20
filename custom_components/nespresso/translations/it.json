@@ -59,15 +59,5 @@
       "bluetooth_only": "Questa integrazione scopre le macchine via Bluetooth automaticamente. Verifica che il Bluetooth sia attivo e la macchina accesa."
     }
   },
-  "options": {
-    "step": {
-      "init": {
-        "title": "Opzioni Nespresso",
-        "data": {
-          "scan_interval": "Intervallo di aggiornamento (secondi)",
-          "persistent_connection": "Connessione persistente (aggiornamenti in tempo reale, blocca l'app Nespresso)"
-        }
-      }
-    }
-  }
+  "options": {}
 }

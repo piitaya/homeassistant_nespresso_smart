@@ -74,7 +74,21 @@ from ..const import (
     VMINI_CHAR_WIFI_MAC,
     MachineFamily,
 )
-from ..models import RawMachineData
+from ..models import NespressoMachineData, RawMachineData
+from .parsing import (
+    parse_barista_machine_info,
+    parse_barista_machine_params,
+    parse_barista_status,
+    parse_caps_counter,
+    parse_error_information,
+    parse_general_user_settings,
+    parse_profile_version,
+    parse_serial_number,
+    parse_vertuonext_machine_info,
+    parse_vertuonext_status,
+    parse_vmini_fota_status,
+)
+from .recipe import parse_recipe_info
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -313,6 +327,10 @@ class AbstractNespressoProtocol(ABC):
     ) -> RawMachineData:
         """Read all relevant characteristics in a single session."""
 
+    @abstractmethod
+    def parse(self, raw: RawMachineData) -> NespressoMachineData:
+        """Build the public dataclass from raw BLE bytes."""
+
 
 class BaristaProtocol(AbstractNespressoProtocol):
     """BLE protocol for Barista (Original Line) machines."""
@@ -350,6 +368,39 @@ class BaristaProtocol(AbstractNespressoProtocol):
             machine_params_bytes=bytes(params),
             recipe_info_bytes=bytes(recipe_info) if recipe_info else None,
             gatt_dump=gatt_dump,
+        )
+
+    def parse(self, raw: RawMachineData) -> NespressoMachineData:
+        assert raw.status_bytes is not None
+        assert raw.info_bytes is not None
+
+        status = parse_barista_status(raw.status_bytes)
+        info = parse_barista_machine_info(raw.info_bytes)
+        serial = parse_serial_number(raw.serial_bytes) if raw.serial_bytes else None
+
+        return NespressoMachineData(
+            machine_state=str(status["machine_state"]),
+            error_present=bool(status["error_present"]),
+            firmware_version=info.get("firmware_version"),
+            hardware_version=info.get("hardware_version"),
+            serial_number=serial,
+            profile_version=parse_profile_version(raw.profile_version_bytes)
+            if raw.profile_version_bytes
+            else None,
+            bootloader_version=info.get("bootloader_version"),
+            bluetooth_version=info.get("bluetooth_version"),
+            motor_running=bool(status.get("motor_running", False)),
+            induction_heating=bool(status.get("induction_heating", False)),
+            setup_complete=bool(status.get("setup_complete", False)),
+            recipe_count=parse_recipe_info(raw.recipe_info_bytes).max_recipes
+            if raw.recipe_info_bytes and len(raw.recipe_info_bytes) >= 8
+            else None,
+            ble_disabled=parse_barista_machine_params(raw.machine_params_bytes).get(
+                "ble_disabled", False
+            )
+            if raw.machine_params_bytes
+            else None,
+            gatt_dump=raw.gatt_dump,
         )
 
 
@@ -436,6 +487,65 @@ class VertuoNextProtocol(AbstractNespressoProtocol):
             gatt_dump=gatt_dump,
         )
 
+    def parse(self, raw: RawMachineData) -> NespressoMachineData:
+        assert raw.status_bytes is not None
+        assert raw.info_bytes is not None
+
+        status = parse_vertuonext_status(raw.status_bytes)
+        info = parse_vertuonext_machine_info(raw.info_bytes)
+        serial = parse_serial_number(raw.serial_bytes) if raw.serial_bytes else None
+
+        water_hardness = None
+        auto_power_off = None
+        if raw.user_settings_bytes:
+            settings = parse_general_user_settings(raw.user_settings_bytes)
+            water_hardness = settings.get("water_hardness")
+            auto_power_off = settings.get("auto_power_off")
+
+        error_code = None
+        if raw.error_info_bytes and len(raw.error_info_bytes) >= 3:
+            err = parse_error_information(raw.error_info_bytes)
+            error_code = err.get("error_code")
+
+        caps_counter = None
+        if raw.caps_counter_bytes:
+            caps_counter = parse_caps_counter(raw.caps_counter_bytes)
+
+        return NespressoMachineData(
+            machine_state=str(status["machine_state"]),
+            error_present=bool(status["error_present"]),
+            firmware_version=info.get("firmware_version"),
+            hardware_version=info.get("hardware_version"),
+            serial_number=serial,
+            profile_version=parse_profile_version(raw.profile_version_bytes)
+            if raw.profile_version_bytes
+            else None,
+            bootloader_version=info.get("bootloader_version"),
+            recipe_db_version=info.get("recipe_db_version"),
+            connectivity_fw_version=info.get("connectivity_fw_version"),
+            water_tank_empty=bool(status.get("water_tank_empty", False)),
+            descaling_needed=bool(status.get("descaling_needed", False)),
+            cleaning_needed=bool(status.get("cleaning_needed", False)),
+            capsule_container_full=bool(status.get("capsule_container_full", False)),
+            brewing_unit_closed=bool(status.get("brewing_unit_closed", False)),
+            milk_frother_running=bool(status.get("milk_frother_running", False)),
+            led_signaling=bool(status.get("led_signaling", False)),
+            cup_length_prog=bool(status.get("cup_length_prog", False)),
+            water_hardness=water_hardness,
+            auto_power_off=auto_power_off,
+            error_code=error_code,
+            caps_counter=caps_counter,
+            error_list_code=parse_error_information(raw.error_list_bytes).get(
+                "error_code"
+            )
+            if raw.error_list_bytes and len(raw.error_list_bytes) >= 3
+            else None,
+            iot_market_name=parse_serial_number(raw.iot_market_bytes)
+            if raw.iot_market_bytes
+            else None,
+            gatt_dump=raw.gatt_dump,
+        )
+
 
 class VMiniProtocol(AbstractNespressoProtocol):
     """BLE protocol for VMini (Vertuo Mini) machines."""
@@ -504,6 +614,33 @@ class VMiniProtocol(AbstractNespressoProtocol):
             fota_status_bytes=bytes(fota_status) if fota_status else None,
             wifi_current_bytes=bytes(wifi_current) if wifi_current else None,
             gatt_dump=gatt_dump_result,
+        )
+
+    def parse(self, raw: RawMachineData) -> NespressoMachineData:
+        serial = parse_serial_number(raw.serial_bytes) if raw.serial_bytes else None
+
+        fota_status = None
+        fota_progress = None
+        if raw.fota_status_bytes:
+            fota = parse_vmini_fota_status(raw.fota_status_bytes)
+            fota_status = str(fota.get("fota_status", "unknown"))
+            raw_progress = fota.get("fota_progress", 0)
+            fota_progress = (
+                int(raw_progress)
+                if isinstance(raw_progress, (int, float, str))
+                else 0
+            )
+
+        return NespressoMachineData(
+            machine_state="unknown",
+            error_present=False,
+            firmware_version=raw.firmware_version,
+            hardware_version=raw.software_version,
+            serial_number=serial,
+            shadow_data=raw.shadow_header,
+            fota_status=fota_status,
+            fota_progress=fota_progress,
+            gatt_dump=raw.gatt_dump,
         )
 
 

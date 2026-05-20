@@ -30,8 +30,6 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
-
 from .const import (
     BARISTA_STATE_NAMES,
     DOMAIN,
@@ -40,6 +38,7 @@ from .const import (
     MachineFamily,
 )
 from .coordinator import NespressoCoordinator
+from .entity import NespressoEntity
 
 ALL_EVENT_TYPES = sorted(
     set(BARISTA_STATE_NAMES.values()) | set(VERTUO_STATE_NAMES.values()) | {"unknown"}
@@ -60,10 +59,9 @@ async def async_setup_entry(
         async_add_entities([NespressoStateChangeEvent(coordinator, entry)])
 
 
-class NespressoStateChangeEvent(CoordinatorEntity[NespressoCoordinator], EventEntity):
+class NespressoStateChangeEvent(NespressoEntity, EventEntity):
     """Event entity that fires when the machine state changes."""
 
-    _attr_has_entity_name = True
     _attr_name = "State change"
     _attr_device_class = EventDeviceClass.BUTTON
     _attr_event_types = ALL_EVENT_TYPES

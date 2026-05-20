@@ -38,8 +38,6 @@ from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
-
 from .const import (
     BARISTA_STATE_NAMES,
     DOMAIN,
@@ -48,6 +46,7 @@ from .const import (
     MachineFamily,
 )
 from .coordinator import NespressoCoordinator
+from .entity import NespressoEntity
 from .models import NespressoMachineData
 from .timer_sensor import NespressoBrewingDuration
 
@@ -234,11 +233,10 @@ async def async_setup_entry(
     async_add_entities(entities)
 
 
-class NespressoSensor(CoordinatorEntity[NespressoCoordinator], SensorEntity):
+class NespressoSensor(NespressoEntity, SensorEntity):
     """A Nespresso machine sensor."""
 
     entity_description: NespressoSensorDescription
-    _attr_has_entity_name = True
 
     def __init__(
         self,

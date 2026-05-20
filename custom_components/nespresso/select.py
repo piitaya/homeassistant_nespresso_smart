@@ -33,8 +33,6 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
-
 from .const import (
     BARISTA_CHAR_LANGUAGE,
     BARISTA_CHAR_RECIPE_SELECTION,
@@ -43,6 +41,7 @@ from .const import (
     MachineFamily,
 )
 from .coordinator import NespressoCoordinator
+from .entity import NespressoEntity
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -118,10 +117,9 @@ async def async_setup_entry(
     async_add_entities(entities)
 
 
-class NespressoRecipeSelect(CoordinatorEntity[NespressoCoordinator], SelectEntity):
+class NespressoRecipeSelect(NespressoEntity, SelectEntity):
     """Select entity for Barista recipe selection."""
 
-    _attr_has_entity_name = True
     _attr_name = "Recipe"
     _attr_icon = "mdi:coffee"
     _attr_options = BARISTA_RECIPES
@@ -167,10 +165,9 @@ class NespressoRecipeSelect(CoordinatorEntity[NespressoCoordinator], SelectEntit
             _LOGGER.error("Failed to set recipe: %s", err)
 
 
-class NespressoLanguageSelect(CoordinatorEntity[NespressoCoordinator], SelectEntity):
+class NespressoLanguageSelect(NespressoEntity, SelectEntity):
     """Select entity for Barista language setting."""
 
-    _attr_has_entity_name = True
     _attr_name = "Language"
     _attr_icon = "mdi:translate"
     _attr_options = BARISTA_LANGUAGES
@@ -219,12 +216,9 @@ class NespressoLanguageSelect(CoordinatorEntity[NespressoCoordinator], SelectEnt
             _LOGGER.error("Failed to set language: %s", err)
 
 
-class NespressoVertuoBrewTypeSelect(
-    CoordinatorEntity[NespressoCoordinator], SelectEntity
-):
+class NespressoVertuoBrewTypeSelect(NespressoEntity, SelectEntity):
     """Select entity for Vertuo Next brew type."""
 
-    _attr_has_entity_name = True
     _attr_name = "Brew type"
     _attr_icon = "mdi:coffee"
     _attr_options = VERTUO_BREW_TYPES
@@ -259,12 +253,9 @@ class NespressoVertuoBrewTypeSelect(
         self.async_write_ha_state()
 
 
-class NespressoVertuoTemperatureSelect(
-    CoordinatorEntity[NespressoCoordinator], SelectEntity
-):
+class NespressoVertuoTemperatureSelect(NespressoEntity, SelectEntity):
     """Select entity for Vertuo Next brew temperature."""
 
-    _attr_has_entity_name = True
     _attr_name = "Brew temperature"
     _attr_icon = "mdi:thermometer"
     _attr_options = VERTUO_TEMPERATURES

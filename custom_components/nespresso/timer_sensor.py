@@ -38,18 +38,16 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import CALLBACK_TYPE, callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.event import async_track_time_interval
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
-
 from .const import DOMAIN, MACHINE_FAMILY_NAMES, MachineFamily
 from .coordinator import NespressoCoordinator
+from .entity import NespressoEntity
 
 BREWING_STATES = {"brewing"}
 
 
-class NespressoBrewingDuration(CoordinatorEntity[NespressoCoordinator], SensorEntity):
+class NespressoBrewingDuration(NespressoEntity, SensorEntity):
     """Sensor that shows elapsed brewing time, updating every second."""
 
-    _attr_has_entity_name = True
     _attr_name = "Brewing duration"
     _attr_icon = "mdi:timer-outline"
     _attr_native_unit_of_measurement = "s"

@@ -59,15 +59,5 @@
       "bluetooth_only": "Ta integracja wykrywa ekspresy przez Bluetooth automatycznie. Upewnij się, że Bluetooth jest włączony i ekspres jest uruchomiony."
     }
   },
-  "options": {
-    "step": {
-      "init": {
-        "title": "Opcje Nespresso",
-        "data": {
-          "scan_interval": "Interwał odświeżania (sekundy)",
-          "persistent_connection": "Trwałe połączenie (aktualizacje w czasie rzeczywistym, blokuje aplikację Nespresso)"
-        }
-      }
-    }
-  }
+  "options": {}
 }

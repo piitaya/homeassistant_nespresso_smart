@@ -27,15 +27,12 @@ from __future__ import annotations
 
 import logging
 
-from homeassistant.components import bluetooth
-from homeassistant.components.bluetooth import BluetoothChange
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
 
-from .config_flow import CONF_PERSISTENT_CONNECTION, CONF_SCAN_INTERVAL
-from .const import DEFAULT_SCAN_INTERVAL, DOMAIN, MACHINE_FAMILY_NAMES, MachineFamily
+from .const import DOMAIN, MACHINE_FAMILY_NAMES, MachineFamily
 from .ble.protocol import generate_auth_key
 from .coordinator import NespressoCoordinator
 
@@ -55,21 +52,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Nespresso from a config entry."""
     address: str = entry.data["address"]
     family = MachineFamily(entry.data["family"])
-    scan_interval = entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
-    persistent = entry.options.get(CONF_PERSISTENT_CONNECTION, False)
 
     _LOGGER.debug(
-        "Setting up Nespresso %s: family=%s interval=%ds persistent=%s",
-        address,
-        family.value,
-        scan_interval,
-        persistent,
+        "Setting up Nespresso %s: family=%s", address, family.value
     )
 
-    coordinator = NespressoCoordinator(hass, address, family, scan_interval, persistent)
+    coordinator = NespressoCoordinator(hass, address, family)
 
-    # Restore or generate auth key (must persist before first_refresh
-    # so the same key survives ConfigEntryNotReady retries)
+    # Restore or generate auth key (persisted before first poll so the same
+    # key survives across HA restarts).
     auth_key = entry.data.get("auth_key")
     if auth_key:
         coordinator.auth_key = auth_key
@@ -82,9 +73,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
         _LOGGER.debug("Generated and persisted auth key: %s****", auth_key[:4])
 
-    await coordinator.async_config_entry_first_refresh()
-
-    # Register device and set device_id for trigger events
+    # Register the device upfront so triggers and entities can attach to it
+    # even before the first poll succeeds.
     device_registry = dr.async_get(hass)
     device_entry = device_registry.async_get_or_create(
         config_entry_id=entry.entry_id,
@@ -100,34 +90,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "coordinator": coordinator,
     }
 
-    # Trigger immediate refresh when machine becomes available via BLE
-    @callback
-    def _async_on_ble_event(
-        service_info: bluetooth.BluetoothServiceInfoBleak,
-        change: BluetoothChange,
-    ) -> None:
-        if not coordinator.last_update_success:
-            _LOGGER.debug("Machine %s detected, triggering refresh", address)
-            hass.async_create_task(coordinator.async_request_refresh())
+    # async_start registers the bluetooth callback and returns the unsubscribe
+    # function. The first poll happens when the first advertisement arrives.
+    entry.async_on_unload(coordinator.async_start())
 
-    entry.async_on_unload(
-        bluetooth.async_register_callback(
-            hass,
-            _async_on_ble_event,
-            bluetooth.BluetoothCallbackMatcher(address=address, connectable=True),
-            bluetooth.BluetoothScanningMode.ACTIVE,
-        )
-    )
-
-    entry.async_on_unload(entry.add_update_listener(_async_options_updated))
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    _LOGGER.debug("Nespresso %s setup complete, device_id=%s", address, device_entry.id)
+    _LOGGER.debug(
+        "Nespresso %s setup complete, device_id=%s", address, device_entry.id
+    )
     return True
-
-
-async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Reload integration when options change."""
-    await hass.config_entries.async_reload(entry.entry_id)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

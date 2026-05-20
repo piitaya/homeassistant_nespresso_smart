@@ -37,10 +37,9 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
-
 from .const import DOMAIN, MACHINE_FAMILY_NAMES, MachineFamily
 from .coordinator import NespressoCoordinator
+from .entity import NespressoEntity
 from .models import NespressoMachineData
 
 
@@ -144,13 +143,10 @@ async def async_setup_entry(
     async_add_entities(entities)
 
 
-class NespressoBinarySensor(
-    CoordinatorEntity[NespressoCoordinator], BinarySensorEntity
-):
+class NespressoBinarySensor(NespressoEntity, BinarySensorEntity):
     """A Nespresso machine binary sensor."""
 
     entity_description: NespressoBinarySensorDescription
-    _attr_has_entity_name = True
 
     def __init__(
         self,

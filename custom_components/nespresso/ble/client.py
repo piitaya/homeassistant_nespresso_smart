@@ -70,19 +70,21 @@ class NespressoClient:
     async def __aenter__(self) -> NespressoClient:
         self._client = await _connect_with_recovery(self._ble_device, self._address)
         await _ensure_bonded(self._client, self._address)
-        if not await _authenticate(self._client, self._auth_key, self._family):
-            # One retry on a fresh connection.
-            _LOGGER.info("Auth failed for %s, reconnecting", self._address)
-            try:
-                await self._client.disconnect()
-            except Exception:  # noqa: BLE001
-                pass
-            self._client = await _connect_with_recovery(
-                self._ble_device, self._address
+        if not self._client.is_connected:
+            # pair() can drop the link on machines that reject the bond
+            # (e.g. the iPhone app already claimed the bonding slot). Skip
+            # auth on a dead connection — running GATT ops would only
+            # produce noisy "Method doesn't exist" cascades.
+            _LOGGER.warning(
+                "BLE link dropped after pair attempt for %s; next poll will retry",
+                self._address,
             )
-            await _ensure_bonded(self._client, self._address)
-            if not await _authenticate(self._client, self._auth_key, self._family):
-                _LOGGER.warning("Auth failed twice for %s", self._address)
+            return self
+        if not await _authenticate(self._client, self._auth_key, self._family):
+            _LOGGER.warning(
+                "Auth failed for %s; the next poll cycle will retry",
+                self._address,
+            )
         return self
 
     async def __aexit__(self, *exc: Any) -> None:
@@ -205,8 +207,28 @@ async def _ensure_bonded(client: BleakClient, address: str) -> None:
     try:
         await client.pair()
         _LOGGER.debug("BLE pair OK for %s", address)
+        # On some BlueZ + ESPHome proxy combinations, pair() invalidates
+        # the GATT services cache for a brief moment. Wait for the link
+        # to stabilize before the auth flow starts writing characteristics.
+        await asyncio.sleep(0.5)
+        return
     except Exception as err:  # noqa: BLE001
-        # Common cases: backend doesn't support pair (macOS), already paired,
-        # or proxy backend that bonds transparently. Auth will fail clearly
-        # if the bond actually wasn't established.
-        _LOGGER.debug("BLE pair skipped for %s: %s", address, err)
+        err_str = str(err).lower()
+
+    if "authentication" in err_str and "failed" in err_str:
+        # The machine refused our bond. Likely the iPhone app took the bonding
+        # slot and the credentials we have are stale. Drop the local bond so
+        # the next poll attempt starts from a clean BlueZ state.
+        _LOGGER.info(
+            "BLE pair rejected for %s, clearing stale local bond", address
+        )
+        try:
+            await client.unpair()
+        except Exception:  # noqa: BLE001
+            pass
+        return
+
+    # Common benign cases: backend doesn't support pair (macOS), already
+    # paired, or proxy that bonds transparently. Auth will fail clearly if
+    # the bond actually wasn't established.
+    _LOGGER.debug("BLE pair skipped for %s: %s", address, err_str)
